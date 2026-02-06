@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { localStorageAdapter, type PersistedState } from "./persistence";
 
 type TestResult = {
   name: string;
@@ -59,6 +60,20 @@ const parseValue = (raw: string): unknown => {
 
 const formatValue = (value?: string) => value ?? "";
 
+const getNextCaseId = (items: TestCaseDraft[]) => {
+  let maxId = 0;
+  for (const item of items) {
+    const match = /case-(\d+)/.exec(item.id);
+    if (match) {
+      const value = Number.parseInt(match[1] ?? "0", 10);
+      if (!Number.isNaN(value)) {
+        maxId = Math.max(maxId, value);
+      }
+    }
+  }
+  return maxId + 1;
+};
+
 export default function Home() {
   const [prompt, setPrompt] = useState(defaultPrompt);
   const [code, setCode] = useState(defaultCode);
@@ -70,6 +85,8 @@ export default function Home() {
   const [apiKey, setApiKey] = useState("");
   const workerRef = useRef<Worker | null>(null);
   const nextId = useRef(4);
+  const [isHydrated, setIsHydrated] = useState(false);
+  const persistTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     const worker = new Worker(new URL("../workers/runner.ts", import.meta.url), {
@@ -91,6 +108,53 @@ export default function Home() {
     workerRef.current = worker;
     return () => worker.terminate();
   }, []);
+
+  useEffect(() => {
+    const saved = localStorageAdapter.load();
+    if (saved) {
+      if (typeof saved.prompt === "string") setPrompt(saved.prompt);
+      if (typeof saved.code === "string") setCode(saved.code);
+      if (Array.isArray(saved.cases)) {
+        setCases(saved.cases);
+        nextId.current = Math.max(nextId.current, getNextCaseId(saved.cases));
+      }
+      if (typeof saved.apiKey === "string") setApiKey(saved.apiKey);
+    }
+    setIsHydrated(true);
+    const unsubscribe = localStorageAdapter.subscribe?.((next) => {
+      if (typeof next.prompt === "string") setPrompt(next.prompt);
+      if (typeof next.code === "string") setCode(next.code);
+      if (Array.isArray(next.cases)) {
+        setCases(next.cases);
+        nextId.current = Math.max(nextId.current, getNextCaseId(next.cases));
+      }
+      if (typeof next.apiKey === "string") setApiKey(next.apiKey);
+    });
+    return unsubscribe;
+  }, []);
+
+  useEffect(() => {
+    if (!isHydrated) return;
+    if (persistTimer.current) {
+      clearTimeout(persistTimer.current);
+    }
+    persistTimer.current = setTimeout(() => {
+      const payload: PersistedState = {
+        version: 1,
+        prompt,
+        code,
+        cases,
+        apiKey,
+      };
+      localStorageAdapter.save(payload);
+    }, 250);
+    return () => {
+      if (persistTimer.current) {
+        clearTimeout(persistTimer.current);
+        persistTimer.current = null;
+      }
+    };
+  }, [prompt, code, cases, apiKey, isHydrated]);
 
   const passCount = useMemo(
     () => results.filter((result) => result.pass).length,
@@ -198,7 +262,7 @@ export default function Home() {
           onChange={(event) => setApiKey(event.target.value)}
         />
         <p className="muted">
-          Stored only in this browser session. If empty, the server will use
+          Stored locally in this browser. If empty, the server will use
           `LLM_API_KEY`.
         </p>
       </section>
